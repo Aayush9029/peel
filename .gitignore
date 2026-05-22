@@ -1,0 +1,8 @@
+/peel
+/peel-*
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp
+/dist/
+/tmp/
