@@ -26,7 +26,6 @@ peel photo.jpg                # writes ./photo.png
 peel photo.jpg -o out.png     # explicit name (overwrites)
 peel *.webp                   # batch into cwd
 peel *.webp -o out/           # batch into a directory
-peel delete -y                # free up disk (~973 MB)
 ```
 
 Reads JPG, PNG, WEBP. Writes PNG with alpha. Model auto-downloads on first run into `~/.config/peel/models/`. If `./photo.png` already exists, the next run writes `peel0123-photo.png` instead of clobbering it.

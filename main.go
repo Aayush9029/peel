@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -10,18 +9,24 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Aayush9029/peel/internal/bgremove"
-	"github.com/Aayush9029/peel/internal/config"
-	"github.com/Aayush9029/peel/internal/model"
-	"github.com/Aayush9029/peel/internal/session"
-	"github.com/Aayush9029/peel/internal/ui"
+	"github.com/Aayush9029/peel/internal/birefnet"
 )
 
 var version = "dev"
 
+const (
+	cReset = "\x1b[0m"
+	cBold  = "\x1b[1m"
+	cDim   = "\x1b[2m"
+	cRed   = "\x1b[31m"
+	cGreen = "\x1b[32m"
+	cCyan  = "\x1b[36m"
+)
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		ui.Fatalf("%s", err)
+		fmt.Fprintf(os.Stderr, "%s✗%s %s\n", cRed, cReset, err)
+		os.Exit(1)
 	}
 }
 
@@ -31,60 +36,15 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
-	case "-h", "--help", "help":
+	case "-h", "--help":
 		printHelp()
 		return nil
-	case "-v", "--version", "version":
+	case "-v", "--version":
 		fmt.Printf("peel %s\n", version)
 		return nil
-	case "delete", "rm":
-		return cmdDelete(args[1:])
 	}
-	return cmdProcess(args)
-}
 
-func cmdDelete(args []string) error {
-	yes := false
-	for _, a := range args {
-		switch a {
-		case "-y", "--yes":
-			yes = true
-		case "-h", "--help":
-			fmt.Println("usage: peel delete [-y]")
-			return nil
-		default:
-			return fmt.Errorf("unknown flag for delete: %s", a)
-		}
-	}
-	m := config.BiRefNetGeneral
-	path, err := config.ModelPath(m)
-	if err != nil {
-		return err
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		ui.Status(fmt.Sprintf("nothing to delete (%s does not exist)", path))
-		return nil
-	}
-	if !yes {
-		fmt.Printf("Delete %s (%s)? [y/N] ", path, humanizeBytes(fi.Size()))
-		reader := bufio.NewReader(os.Stdin)
-		line, _ := reader.ReadString('\n')
-		line = strings.TrimSpace(strings.ToLower(line))
-		if line != "y" && line != "yes" {
-			ui.Status("aborted")
-			return nil
-		}
-	}
-	if err := os.Remove(path); err != nil {
-		return err
-	}
-	ui.Success(fmt.Sprintf("removed %s", path))
-	return nil
-}
-
-func cmdProcess(args []string) error {
-	opts, inputs, err := parseProcessFlags(args)
+	output, inputs, err := parseArgs(args)
 	if err != nil {
 		return err
 	}
@@ -92,60 +52,54 @@ func cmdProcess(args []string) error {
 		return errors.New("no input images (try `peel --help`)")
 	}
 
-	// Validate inputs up front so typos surface before the model load.
 	for _, in := range inputs {
 		if _, err := os.Stat(in); err != nil {
 			return fmt.Errorf("input %s: %w", in, err)
 		}
-		if !bgremove.IsLikelyImage(in) {
-			return fmt.Errorf("input %s: unsupported extension (peel reads %s)", in, strings.Join(bgremove.SupportedInputExts, ", "))
+		if !birefnet.IsImage(in) {
+			return fmt.Errorf("input %s: unsupported (peel reads %s)", in, birefnet.SupportedFormats())
 		}
 	}
 
-	outputs, err := resolveOutputs(inputs, opts.output)
+	outputs, err := resolveOutputs(inputs, output)
 	if err != nil {
 		return err
 	}
 
-	m := config.BiRefNetGeneral
-	modelPath, err := config.ModelPath(m)
+	modelPath, err := birefnet.ModelPath()
 	if err != nil {
 		return err
 	}
-	if fi, statErr := os.Stat(modelPath); statErr != nil || fi.Size() == 0 {
-		if opts.noDownload {
-			return fmt.Errorf("model not found at %s and --no-download was set", modelPath)
-		}
-		ui.Status(fmt.Sprintf("downloading model (~%d MB) → %s", m.SizeMB, modelPath))
-		if _, err := model.DownloadIfMissing(m, false, true); err != nil {
+	if fi, err := os.Stat(modelPath); err != nil || fi.Size() == 0 {
+		fmt.Fprintf(os.Stderr, "%s→%s downloading model (~%d MB) → %s\n", cCyan, cReset, birefnet.ModelSizeMB, modelPath)
+		if _, err := birefnet.DownloadModel(); err != nil {
 			return err
 		}
 	}
 
-	ui.Status(fmt.Sprintf("loading model (%s)", filepath.Base(modelPath)))
 	loadStart := time.Now()
-	sess, err := session.New(modelPath)
+	sess, err := birefnet.NewSession(modelPath)
 	if err != nil {
 		return err
 	}
 	defer sess.Close()
-	ui.Dimf("  loaded in %s", time.Since(loadStart).Round(100*time.Millisecond))
+	fmt.Printf("%sloaded in %s%s\n", cDim, time.Since(loadStart).Round(100*time.Millisecond), cReset)
 
 	for i, in := range inputs {
 		start := time.Now()
-		ui.Status(fmt.Sprintf("%s → %s", in, outputs[i]))
-		if err := bgremove.ProcessFile(sess, in, outputs[i]); err != nil {
+		if err := sess.Process(in, outputs[i]); err != nil {
 			return err
 		}
-		ui.Success(fmt.Sprintf("  done in %s", time.Since(start).Round(100*time.Millisecond)))
+		fmt.Printf("%s✓%s %s → %s %s(%s)%s\n",
+			cGreen, cReset, in, outputs[i],
+			cDim, time.Since(start).Round(100*time.Millisecond), cReset)
 	}
 	return nil
 }
 
-// resolveOutputs maps inputs to PNG paths. `-o` is authoritative: file when
-// single input, directory when batch or trailing-slash. Without `-o`, default
-// to <base>.png in cwd, swapping to peel<4-digit>-<base>.png on collision so
-// we never silently overwrite an existing file.
+// resolveOutputs maps inputs to PNG paths. `-o` is authoritative. Without it,
+// default to <base>.png in cwd; on collision fall back to peel<4-digit>-<base>.png
+// so re-runs never clobber prior work.
 func resolveOutputs(inputs []string, outFlag string) ([]string, error) {
 	outputs := make([]string, len(inputs))
 
@@ -161,11 +115,6 @@ func resolveOutputs(inputs []string, outFlag string) ([]string, error) {
 			return outputs, nil
 		}
 		outputs[0] = outFlag
-		if dir := filepath.Dir(outFlag); dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return nil, err
-			}
-		}
 		return outputs, nil
 	}
 
@@ -182,45 +131,30 @@ func resolveOutputs(inputs []string, outFlag string) ([]string, error) {
 	return outputs, nil
 }
 
-type processOpts struct {
-	output     string
-	noDownload bool
-}
-
-func parseProcessFlags(args []string) (processOpts, []string, error) {
-	var opts processOpts
-	var positional []string
-
+func parseArgs(args []string) (output string, inputs []string, err error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "-o" || a == "--output":
 			if i+1 >= len(args) {
-				return opts, nil, fmt.Errorf("%s requires a value", a)
+				return "", nil, fmt.Errorf("%s requires a value", a)
 			}
-			opts.output = args[i+1]
+			output = args[i+1]
 			i++
-		case strings.HasPrefix(a, "--output="):
-			opts.output = strings.TrimPrefix(a, "--output=")
-		case strings.HasPrefix(a, "-o="):
-			opts.output = strings.TrimPrefix(a, "-o=")
-		case a == "--no-download":
-			opts.noDownload = true
 		case a == "-h" || a == "--help":
 			printHelp()
 			os.Exit(0)
 		case strings.HasPrefix(a, "-"):
-			return opts, nil, fmt.Errorf("unknown flag: %s", a)
+			return "", nil, fmt.Errorf("unknown flag: %s", a)
 		default:
-			positional = append(positional, a)
+			inputs = append(inputs, a)
 		}
 	}
-	return opts, positional, nil
+	return output, inputs, nil
 }
 
 func swapExt(path, newExt string) string {
-	ext := filepath.Ext(path)
-	return strings.TrimSuffix(path, ext) + newExt
+	return strings.TrimSuffix(path, filepath.Ext(path)) + newExt
 }
 
 func isDir(path string) bool {
@@ -233,42 +167,16 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func humanizeBytes(n int64) string {
-	const u = 1024
-	if n < u {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(u), 0
-	for v := n / u; v >= u; v /= u {
-		div *= u
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
-}
-
 func printHelp() {
-	fmt.Printf(`%speel%s v%s — remove image backgrounds with BiRefNet
+	fmt.Printf(`%speel%s v%s — remove image backgrounds
 
 %sUsage:%s
-  peel a.jpg                    Write ./a.png (auto peel0123-a.png on collision)
-  peel a.jpg -o out.png         Explicit output (overwrites)
-  peel a.jpg b.jpg c.webp       Batch into cwd
-  peel *.webp -o out/           Batch into a directory
-  peel delete [-y]              Remove the cached model
+  peel a.jpg                Write ./a.png (peel0123-a.png on collision)
+  peel a.jpg -o out.png     Explicit name (overwrites)
+  peel *.webp               Batch into cwd
+  peel *.webp -o out/       Batch into a directory
 
-%sFlags:%s
-  -o, --output <path>           Output file (single) or directory (batch)
-      --no-download             Fail instead of auto-downloading the model
-  -h, --help                    Show this help
-  -v, --version                 Show the version
-
-%sFormats:%s JPG, PNG, WEBP in → PNG with alpha out.
-%sModel:%s    ~/.config/peel/models/  (override with PEEL_CACHE_DIR or XDG_CONFIG_HOME)
-`,
-		ui.Bold, ui.Reset, version,
-		ui.Bold, ui.Reset,
-		ui.Bold, ui.Reset,
-		ui.Bold, ui.Reset,
-		ui.Bold, ui.Reset,
-	)
+Reads JPG, PNG, WEBP. Writes PNG with alpha.
+Model lives in ~/.config/peel/models/ (~973 MB, auto-downloads).
+`, cBold, cReset, version, cBold, cReset)
 }
