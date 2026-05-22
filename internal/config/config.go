@@ -7,21 +7,16 @@ import (
 	"runtime"
 )
 
-// Model is the static description of a downloadable ONNX model. Today peel
-// ships exactly one (BiRefNet-general), but the type leaves room for adding
-// alternatives without rewriting the cache/list/delete plumbing.
 type Model struct {
-	ID       string // stable identifier used in URLs + filenames
-	Filename string // on-disk name inside the cache directory
-	URL      string // direct .onnx download URL
-	SizeMB   int    // expected download size, used in `peel list`
-	MD5      string // optional integrity check
+	ID       string
+	Filename string
+	URL      string
+	SizeMB   int
+	MD5      string
 }
 
-// BiRefNetGeneral is the one model peel knows how to drive. Pinned to the
-// rembg v0.0.0 release because that's the artefact we proved on a 74-image
-// medication batch — newer revisions reorganise the output node and break
-// inference with no warning.
+// Pinned to the rembg v0.0.0 artefact — that's the build proven on the
+// medication-asset batch. Newer revisions reorganise the output node.
 var BiRefNetGeneral = Model{
 	ID:       "birefnet-general",
 	Filename: "birefnet-general.onnx",
@@ -30,26 +25,20 @@ var BiRefNetGeneral = Model{
 	MD5:      "7a35a0141cbbc80de11d9c9a28f52697",
 }
 
-// CacheDir returns the directory peel uses to store ONNX models. Honors
-// PEEL_CACHE_DIR for tests/overrides, otherwise defaults to XDG.
 func CacheDir() (string, error) {
 	if dir := os.Getenv("PEEL_CACHE_DIR"); dir != "" {
 		return dir, nil
 	}
-	// Use XDG_DATA_HOME if set, else ~/.cache/peel — matches the rest of
-	// the brew-tools family and keeps us out of rembg's ~/.u2net so each
-	// CLI owns its cache.
-	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "peel"), nil
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "peel", "models"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".cache", "peel"), nil
+	return filepath.Join(home, ".config", "peel", "models"), nil
 }
 
-// ModelPath returns where the given model would live on disk.
 func ModelPath(m Model) (string, error) {
 	dir, err := CacheDir()
 	if err != nil {
@@ -58,7 +47,6 @@ func ModelPath(m Model) (string, error) {
 	return filepath.Join(dir, m.Filename), nil
 }
 
-// EnsureCacheDir creates the cache directory if it doesn't exist.
 func EnsureCacheDir() (string, error) {
 	dir, err := CacheDir()
 	if err != nil {
@@ -70,10 +58,8 @@ func EnsureCacheDir() (string, error) {
 	return dir, nil
 }
 
-// OnnxRuntimeLibrary returns the path to libonnxruntime.dylib. Honors
-// ONNXRUNTIME_LIB for tests/dev, otherwise probes the standard Homebrew
-// install paths (the brew formula's `depends_on "onnxruntime"` guarantees
-// it lives at one of these locations on user machines).
+// OnnxRuntimeLibrary probes the standard Homebrew install paths; the formula's
+// `depends_on "onnxruntime"` guarantees one will exist on user machines.
 func OnnxRuntimeLibrary() (string, error) {
 	if p := os.Getenv("ONNXRUNTIME_LIB"); p != "" {
 		if _, err := os.Stat(p); err == nil {
@@ -86,8 +72,8 @@ func OnnxRuntimeLibrary() (string, error) {
 	switch runtime.GOOS {
 	case "darwin":
 		candidates = []string{
-			"/opt/homebrew/lib/libonnxruntime.dylib",   // Apple Silicon
-			"/usr/local/lib/libonnxruntime.dylib",      // Intel Mac
+			"/opt/homebrew/lib/libonnxruntime.dylib",
+			"/usr/local/lib/libonnxruntime.dylib",
 			"/opt/homebrew/opt/onnxruntime/lib/libonnxruntime.dylib",
 			"/usr/local/opt/onnxruntime/lib/libonnxruntime.dylib",
 		}

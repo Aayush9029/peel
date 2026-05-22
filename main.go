@@ -1,18 +1,10 @@
-// peel removes backgrounds from images using the BiRefNet-General ONNX model.
-//
-// Usage:
-//
-//	peel download              # fetch the model into the cache
-//	peel list                  # show installed models + sizes + paths
-//	peel delete [-y]           # remove cached model(s)
-//	peel a.jpg -o b.png        # single image
-//	peel a.jpg b.jpg -o out/   # batch into a directory
 package main
 
 import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,76 +37,10 @@ func run(args []string) error {
 	case "-v", "--version", "version":
 		fmt.Printf("peel %s\n", version)
 		return nil
-	case "download":
-		return cmdDownload(args[1:])
-	case "list":
-		return cmdList(args[1:])
 	case "delete", "rm":
 		return cmdDelete(args[1:])
 	}
-	// Anything else → treat as image processing.
 	return cmdProcess(args)
-}
-
-func cmdDownload(args []string) error {
-	force := false
-	for _, a := range args {
-		switch a {
-		case "-f", "--force":
-			force = true
-		case "-h", "--help":
-			fmt.Println("usage: peel download [--force]")
-			return nil
-		default:
-			return fmt.Errorf("unknown flag for download: %s", a)
-		}
-	}
-	m := config.BiRefNetGeneral
-	path, err := config.ModelPath(m)
-	if err != nil {
-		return err
-	}
-	if !force {
-		if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
-			ui.Success(fmt.Sprintf("already cached: %s", path))
-			return nil
-		}
-	}
-	ui.Status(fmt.Sprintf("downloading %s (~%d MB) → %s", m.ID, m.SizeMB, path))
-	out, err := model.DownloadIfMissing(m, force, true)
-	if err != nil {
-		return err
-	}
-	ui.Success(fmt.Sprintf("saved: %s", out))
-	return nil
-}
-
-func cmdList(args []string) error {
-	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Println("usage: peel list")
-		return nil
-	}
-	dir, err := config.CacheDir()
-	if err != nil {
-		return err
-	}
-	ui.Dimf("cache: %s", dir)
-	fmt.Println()
-
-	models := []config.Model{config.BiRefNetGeneral}
-	for _, m := range models {
-		path, _ := config.ModelPath(m)
-		fi, err := os.Stat(path)
-		status := "not installed"
-		size := ""
-		if err == nil {
-			status = "installed"
-			size = humanizeBytes(fi.Size())
-		}
-		fmt.Printf("  %-22s  %-12s  %s\n", m.ID, status, size)
-		ui.Dimf("    %s", path)
-	}
-	return nil
 }
 
 func cmdDelete(args []string) error {
@@ -166,8 +92,7 @@ func cmdProcess(args []string) error {
 		return errors.New("no input images (try `peel --help`)")
 	}
 
-	// Validate inputs up front so users find typos before we eat the
-	// ~6-second model load on Apple Silicon.
+	// Validate inputs up front so typos surface before the model load.
 	for _, in := range inputs {
 		if _, err := os.Stat(in); err != nil {
 			return fmt.Errorf("input %s: %w", in, err)
@@ -177,34 +102,11 @@ func cmdProcess(args []string) error {
 		}
 	}
 
-	// Decide output paths. Single-input: `-o` is a file (or auto if absent).
-	// Multi-input: `-o` is a directory (or default to ./).
-	outputs := make([]string, len(inputs))
-	if len(inputs) == 1 {
-		if opts.output == "" {
-			outputs[0] = swapExt(inputs[0], ".png")
-		} else if isDir(opts.output) || strings.HasSuffix(opts.output, "/") {
-			if err := os.MkdirAll(opts.output, 0o755); err != nil {
-				return err
-			}
-			outputs[0] = filepath.Join(opts.output, filepath.Base(swapExt(inputs[0], ".png")))
-		} else {
-			outputs[0] = opts.output
-		}
-	} else {
-		dir := opts.output
-		if dir == "" {
-			dir = "."
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-		for i, in := range inputs {
-			outputs[i] = filepath.Join(dir, filepath.Base(swapExt(in, ".png")))
-		}
+	outputs, err := resolveOutputs(inputs, opts.output)
+	if err != nil {
+		return err
 	}
 
-	// Ensure the model is on disk. Auto-download unless --no-download.
 	m := config.BiRefNetGeneral
 	modelPath, err := config.ModelPath(m)
 	if err != nil {
@@ -212,7 +114,7 @@ func cmdProcess(args []string) error {
 	}
 	if fi, statErr := os.Stat(modelPath); statErr != nil || fi.Size() == 0 {
 		if opts.noDownload {
-			return fmt.Errorf("model not found at %s and --no-download was set (run `peel download`)", modelPath)
+			return fmt.Errorf("model not found at %s and --no-download was set", modelPath)
 		}
 		ui.Status(fmt.Sprintf("downloading model (~%d MB) → %s", m.SizeMB, modelPath))
 		if _, err := model.DownloadIfMissing(m, false, true); err != nil {
@@ -240,14 +142,51 @@ func cmdProcess(args []string) error {
 	return nil
 }
 
+// resolveOutputs maps inputs to PNG paths. `-o` is authoritative: file when
+// single input, directory when batch or trailing-slash. Without `-o`, default
+// to <base>.png in cwd, swapping to peel<4-digit>-<base>.png on collision so
+// we never silently overwrite an existing file.
+func resolveOutputs(inputs []string, outFlag string) ([]string, error) {
+	outputs := make([]string, len(inputs))
+
+	if outFlag != "" {
+		treatAsDir := len(inputs) > 1 || isDir(outFlag) || strings.HasSuffix(outFlag, string(os.PathSeparator))
+		if treatAsDir {
+			if err := os.MkdirAll(outFlag, 0o755); err != nil {
+				return nil, err
+			}
+			for i, in := range inputs {
+				outputs[i] = filepath.Join(outFlag, filepath.Base(swapExt(in, ".png")))
+			}
+			return outputs, nil
+		}
+		outputs[0] = outFlag
+		if dir := filepath.Dir(outFlag); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return nil, err
+			}
+		}
+		return outputs, nil
+	}
+
+	claimed := map[string]bool{}
+	for i, in := range inputs {
+		base := filepath.Base(swapExt(in, ".png"))
+		candidate := base
+		if claimed[candidate] || fileExists(candidate) {
+			candidate = fmt.Sprintf("peel%04d-%s", rand.Intn(10000), base)
+		}
+		claimed[candidate] = true
+		outputs[i] = candidate
+	}
+	return outputs, nil
+}
+
 type processOpts struct {
 	output     string
 	noDownload bool
 }
 
-// parseProcessFlags pulls -o/--output and --no-download out of args, leaving
-// the rest as positional input paths. Flags can appear before, after, or
-// interleaved with positionals — `peel a.jpg -o b.png c.jpg` works.
 func parseProcessFlags(args []string) (processOpts, []string, error) {
 	var opts processOpts
 	var positional []string
@@ -289,6 +228,11 @@ func isDir(path string) bool {
 	return err == nil && fi.IsDir()
 }
 
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func humanizeBytes(n int64) string {
 	const u = 1024
 	if n < u {
@@ -306,20 +250,20 @@ func printHelp() {
 	fmt.Printf(`%speel%s v%s — remove image backgrounds with BiRefNet
 
 %sUsage:%s
-  peel download                 Fetch the BiRefNet model into the cache.
-  peel list                     Show installed models, sizes, and paths.
-  peel delete [-y]              Remove cached model(s).
-  peel <image> [-o <out.png>]   Remove background from a single image.
-  peel a.jpg b.jpg -o out/      Batch: -o is the output directory.
+  peel a.jpg                    Write ./a.png (auto peel0123-a.png on collision)
+  peel a.jpg -o out.png         Explicit output (overwrites)
+  peel a.jpg b.jpg c.webp       Batch into cwd
+  peel *.webp -o out/           Batch into a directory
+  peel delete [-y]              Remove the cached model
 
 %sFlags:%s
-  -o, --output <path>           Output file (single) or directory (batch).
-      --no-download             Fail instead of auto-downloading the model.
-  -h, --help                    Show this help.
-  -v, --version                 Show the version.
+  -o, --output <path>           Output file (single) or directory (batch)
+      --no-download             Fail instead of auto-downloading the model
+  -h, --help                    Show this help
+  -v, --version                 Show the version
 
 %sFormats:%s JPG, PNG, WEBP in → PNG with alpha out.
-%sCache:%s    ~/.cache/peel/  (override with PEEL_CACHE_DIR or XDG_CACHE_HOME)
+%sModel:%s    ~/.config/peel/models/  (override with PEEL_CACHE_DIR or XDG_CONFIG_HOME)
 `,
 		ui.Bold, ui.Reset, version,
 		ui.Bold, ui.Reset,

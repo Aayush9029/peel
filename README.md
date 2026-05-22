@@ -11,7 +11,7 @@
 
 ## Why
 
-Cloud background removers eat your originals. Vision API and U²-Net erode product photos. `peel` runs BiRefNet-General locally and produces clean alpha cutouts — the same model rembg ships, wrapped in a single static Go binary with no Python in sight.
+Cloud background removers eat your originals. Vision API and U²-Net erode product photos. `peel` runs BiRefNet-General locally and produces clean alpha cutouts — the same model rembg ships, wrapped in a single Go binary with no Python in sight.
 
 ## Install
 
@@ -19,24 +19,17 @@ Cloud background removers eat your originals. Vision API and U²-Net erode produ
 brew install aayush9029/tap/peel
 ```
 
-Or tap first:
-
-```bash
-brew tap aayush9029/tap
-brew install peel
-```
-
 ## Usage
 
 ```bash
-peel download                       # fetch the model (~973 MB, one time)
-peel list                           # show installed models
-peel photo.jpg -o photo.png         # remove background from one image
-peel a.jpg b.jpg c.webp -o out/     # batch into a directory
-peel delete -y                      # free up disk
+peel photo.jpg                # writes ./photo.png
+peel photo.jpg -o out.png     # explicit name (overwrites)
+peel *.webp                   # batch into cwd
+peel *.webp -o out/           # batch into a directory
+peel delete -y                # free up disk (~973 MB)
 ```
 
-Input: JPG, PNG, WEBP. Output: PNG with alpha. The model auto-downloads on first inference if missing — pass `--no-download` to fail instead.
+Reads JPG, PNG, WEBP. Writes PNG with alpha. Model auto-downloads on first run into `~/.config/peel/models/`. If `./photo.png` already exists, the next run writes `peel0123-photo.png` instead of clobbering it.
 
 ## License
 

@@ -1,6 +1,3 @@
-// Package session wraps an ONNX Runtime InferenceSession over BiRefNet.
-// One *Session can be reused across many images — input/output tensors are
-// allocated once and re-filled per Run().
 package session
 
 import (
@@ -13,22 +10,16 @@ import (
 	"github.com/Aayush9029/peel/internal/config"
 )
 
-const (
-	// InputSize is BiRefNet's expected square side (1024×1024 RGB).
-	InputSize = 1024
-)
+const InputSize = 1024
 
-// BiRefNet I/O node names — discovered via onnxruntime introspection of the
-// distributed model. Hard-coded because re-querying the session metadata for
-// every image is wasteful and the model is pinned.
 const (
 	inputName  = "input_image"
 	outputName = "output_image"
 )
 
-// ImageNet normalisation. BiRefNet was trained against these because it sits
-// on top of a Swin backbone — using the wrong values produces washed-out
-// masks that look "almost right" until you check the alpha histogram.
+// ImageNet normalisation — BiRefNet sits on a Swin backbone and was trained
+// against these. Wrong values produce masks that look almost-right but read
+// as washed-out alpha.
 var (
 	mean = [3]float32{0.485, 0.456, 0.406}
 	std  = [3]float32{0.229, 0.224, 0.225}
@@ -39,8 +30,6 @@ var (
 	envErr  error
 )
 
-// initEnv loads the ONNX Runtime shared library and bootstraps the global
-// environment exactly once per process. Subsequent NewSession calls reuse it.
 func initEnv() error {
 	envOnce.Do(func() {
 		libPath, err := config.OnnxRuntimeLibrary()
@@ -51,21 +40,18 @@ func initEnv() error {
 		ort.SetSharedLibraryPath(libPath)
 		if err := ort.InitializeEnvironment(); err != nil {
 			envErr = fmt.Errorf("init onnxruntime: %w", err)
-			return
 		}
 	})
 	return envErr
 }
 
-// Session is a reusable BiRefNet inference handle. Not safe for concurrent
-// use — wrap in a mutex or build one Session per goroutine.
+// Session is not safe for concurrent use.
 type Session struct {
 	inner       *ort.AdvancedSession
 	inputTensor *ort.Tensor[float32]
 	outputTens  *ort.Tensor[float32]
 }
 
-// New opens an ONNX session against the given .onnx file.
 func New(modelPath string) (*Session, error) {
 	if err := initEnv(); err != nil {
 		return nil, err
@@ -98,14 +84,9 @@ func New(modelPath string) (*Session, error) {
 		return nil, fmt.Errorf("open onnx session: %w", err)
 	}
 
-	return &Session{
-		inner:       inner,
-		inputTensor: inputTensor,
-		outputTens:  outputTensor,
-	}, nil
+	return &Session{inner: inner, inputTensor: inputTensor, outputTens: outputTensor}, nil
 }
 
-// Close releases all native resources. Safe to call multiple times.
 func (s *Session) Close() {
 	if s == nil {
 		return
@@ -124,21 +105,15 @@ func (s *Session) Close() {
 	}
 }
 
-// Predict runs BiRefNet against a pre-resized 1024×1024 RGB image and returns
-// the 1024×1024 grayscale alpha mask in row-major order (values 0..1).
-// `rgbHWC` must be exactly 1024*1024*3 uint8s (R,G,B per pixel).
-//
-// Pre/post-processing matches rembg's BiRefNetSessionGeneral exactly so that
-// users who calibrated their workflow on rembg get identical cutouts.
+// Predict expects exactly 1024*1024*3 RGB bytes and returns a 1024² alpha mask
+// in [0,1] row-major. Pre/post-processing matches rembg's BiRefNet session.
 func (s *Session) Predict(rgbHWC []uint8) ([]float32, error) {
 	if len(rgbHWC) != InputSize*InputSize*3 {
 		return nil, fmt.Errorf("input must be %d bytes (got %d)", InputSize*InputSize*3, len(rgbHWC))
 	}
 
-	// rembg quirk worth matching: it divides the pixel array by max(im.max(), 1e-6),
-	// NOT by 255. For a typical photo that's identical (255/255 → 1.0); for
-	// underexposed crops it stretches before mean/std. Either way we mirror
-	// it to stay on-parity with the rembg cutouts we proved.
+	// rembg parity: divide by max(pixel, 1e-6), NOT by 255. For most photos
+	// these are equivalent; on underexposed crops it stretches before mean/std.
 	var pxMax uint8
 	for _, v := range rgbHWC {
 		if v > pxMax {
@@ -151,7 +126,6 @@ func (s *Session) Predict(rgbHWC []uint8) ([]float32, error) {
 	}
 
 	data := s.inputTensor.GetData()
-	// CHW layout: data[c*H*W + y*W + x]
 	const HW = InputSize * InputSize
 	for y := 0; y < InputSize; y++ {
 		row := y * InputSize * 3
@@ -172,7 +146,6 @@ func (s *Session) Predict(rgbHWC []uint8) ([]float32, error) {
 
 	raw := s.outputTens.GetData()
 	mask := make([]float32, HW)
-	// Sigmoid + min/max normalise → [0, 1].
 	var mn, mx float32 = math.MaxFloat32, -math.MaxFloat32
 	for i := 0; i < HW; i++ {
 		v := float32(1.0 / (1.0 + math.Exp(float64(-raw[i]))))
@@ -186,7 +159,6 @@ func (s *Session) Predict(rgbHWC []uint8) ([]float32, error) {
 	}
 	span := mx - mn
 	if span < 1e-6 {
-		// Flat mask — return as-is; the caller can decide what to do.
 		return mask, nil
 	}
 	for i := range mask {

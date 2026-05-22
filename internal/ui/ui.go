@@ -5,8 +5,6 @@ import (
 	"os"
 )
 
-// ANSI sequences used across peel. Gated by IsTTY() at the call site so that
-// piped output stays clean.
 const (
 	Reset   = "\x1b[0m"
 	Bold    = "\x1b[1m"
@@ -19,8 +17,6 @@ const (
 	Cyan    = "\x1b[36m"
 )
 
-// IsTTY returns true when stdout is attached to a terminal — gate colours and
-// progress bars on this so piped/redirected output stays parseable.
 func IsTTY() bool {
 	fi, err := os.Stdout.Stat()
 	if err != nil {

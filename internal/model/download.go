@@ -7,17 +7,12 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 
 	"github.com/schollz/progressbar/v3"
 
 	"github.com/Aayush9029/peel/internal/config"
 )
 
-// DownloadIfMissing returns the path to the cached model, downloading it from
-// the source URL if the file is absent. Set verify=true to MD5-check after
-// download (always done during initial fetch; skipped on cache hit so we don't
-// re-read 973 MB on every invocation).
 func DownloadIfMissing(m config.Model, force bool, verify bool) (string, error) {
 	path, err := config.ModelPath(m)
 	if err != nil {
@@ -45,16 +40,13 @@ func DownloadIfMissing(m config.Model, force bool, verify bool) (string, error) 
 		}
 		if got != m.MD5 {
 			os.Remove(path)
-			return "", fmt.Errorf("checksum mismatch: got %s want %s (re-run `peel download`)", got, m.MD5)
+			return "", fmt.Errorf("checksum mismatch: got %s want %s", got, m.MD5)
 		}
 	}
 
 	return path, nil
 }
 
-// download streams `url` to `dst` via a tmp file + atomic rename, with a
-// progress bar to stderr. The tmp-file shuffle prevents a corrupted partial
-// from masquerading as a cached model on the next run.
 func download(url, dst, desc string) error {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -77,7 +69,7 @@ func download(url, dst, desc string) error {
 		progressbar.OptionSetWriter(os.Stderr),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(30),
-		progressbar.OptionThrottle(100*1e6), // 100ms
+		progressbar.OptionThrottle(100*1e6),
 		progressbar.OptionShowCount(),
 		progressbar.OptionOnCompletion(func() { fmt.Fprintln(os.Stderr) }),
 		progressbar.OptionSetRenderBlankState(true),
@@ -92,14 +84,7 @@ func download(url, dst, desc string) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// Best-effort: ensure intermediate dirs exist (Rename above would've
-	// failed otherwise — but defensive against partial bugs in CacheDir).
-	_ = os.MkdirAll(filepath.Dir(dst), 0o755)
-	return nil
+	return os.Rename(tmp, dst)
 }
 
 func md5File(path string) (string, error) {
